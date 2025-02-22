@@ -1,20 +1,20 @@
 from typing import Optional
-
 import gradio as gr
 import numpy as np
 import torch
 from PIL import Image
 import io
-
-
-import base64, os
+import base64
+import os
 from util.utils import check_ocr_box, get_yolo_model, get_caption_model_processor, get_som_labeled_img
-import torch
-from PIL import Image
+from fastapi import FastAPI, UploadFile, File
+from fastapi.responses import JSONResponse
+import uvicorn
+from io import BytesIO
 
+# Initialize models
 yolo_model = get_yolo_model(model_path='weights/icon_detect/model.pt')
 caption_model_processor = get_caption_model_processor(model_name="florence2", model_name_or_path="weights/icon_caption_florence")
-# caption_model_processor = get_caption_model_processor(model_name="blip2", model_name_or_path="weights/icon_caption_blip2")
 
 MARKDOWN = """
 # OmniParser for Pure Vision Based General GUI Agent 🔥
@@ -29,9 +29,6 @@ OmniParser is a screen parsing tool to convert general GUI screen to structured 
 
 DEVICE = torch.device('cuda')
 
-# @spaces.GPU
-# @torch.inference_mode()
-# @torch.autocast(device_type="cuda", dtype=torch.bfloat16)
 def process(
     image_input,
     box_threshold,
@@ -39,7 +36,6 @@ def process(
     use_paddleocr,
     imgsz
 ) -> Optional[Image.Image]:
-
     image_save_path = 'imgs/saved_image_demo.png'
     image_input.save(image_save_path)
     image = Image.open(image_save_path)
@@ -50,28 +46,46 @@ def process(
         'text_padding': max(int(3 * box_overlay_ratio), 1),
         'thickness': max(int(3 * box_overlay_ratio), 1),
     }
-    # import pdb; pdb.set_trace()
 
-    ocr_bbox_rslt, is_goal_filtered = check_ocr_box(image_save_path, display_img = False, output_bb_format='xyxy', goal_filtering=None, easyocr_args={'paragraph': False, 'text_threshold':0.9}, use_paddleocr=use_paddleocr)
+    ocr_bbox_rslt, is_goal_filtered = check_ocr_box(
+        image_save_path, 
+        display_img=False, 
+        output_bb_format='xyxy', 
+        goal_filtering=None, 
+        easyocr_args={'paragraph': False, 'text_threshold':0.9}, 
+        use_paddleocr=use_paddleocr
+    )
     text, ocr_bbox = ocr_bbox_rslt
-    # print('prompt:', prompt)
-    dino_labled_img, label_coordinates, parsed_content_list = get_som_labeled_img(image_save_path, yolo_model, BOX_TRESHOLD = box_threshold, output_coord_in_ratio=True, ocr_bbox=ocr_bbox,draw_bbox_config=draw_bbox_config, caption_model_processor=caption_model_processor, ocr_text=text,iou_threshold=iou_threshold, imgsz=imgsz,)  
+    
+    dino_labled_img, label_coordinates, parsed_content_list = get_som_labeled_img(
+        image_save_path,
+        yolo_model,
+        BOX_TRESHOLD=box_threshold,
+        output_coord_in_ratio=True,
+        ocr_bbox=ocr_bbox,
+        draw_bbox_config=draw_bbox_config,
+        caption_model_processor=caption_model_processor,
+        ocr_text=text,
+        iou_threshold=iou_threshold,
+        imgsz=imgsz,
+    )
+    
     image = Image.open(io.BytesIO(base64.b64decode(dino_labled_img)))
     print('finish processing')
     parsed_content_list = '\n'.join([f'icon {i}: ' + str(v) for i,v in enumerate(parsed_content_list)])
-    # parsed_content_list = str(parsed_content_list)
     return image, str(parsed_content_list)
 
+# Create FastAPI app
+app = FastAPI()
+
+# Create Gradio interface
 with gr.Blocks() as demo:
     gr.Markdown(MARKDOWN)
     with gr.Row():
         with gr.Column():
-            image_input_component = gr.Image(
-                type='pil', label='Upload image')
-            # set the threshold for removing the bounding boxes with low confidence, default is 0.05
+            image_input_component = gr.Image(type='pil', label='Upload image')
             box_threshold_component = gr.Slider(
                 label='Box Threshold', minimum=0.01, maximum=1.0, step=0.01, value=0.05)
-            # set the threshold for removing the bounding boxes with large overlap, default is 0.1
             iou_threshold_component = gr.Slider(
                 label='IOU Threshold', minimum=0.01, maximum=1.0, step=0.01, value=0.1)
             use_paddleocr_component = gr.Checkbox(
@@ -96,5 +110,55 @@ with gr.Blocks() as demo:
         outputs=[image_output_component, text_output_component]
     )
 
-# demo.launch(debug=False, show_error=True, share=True)
-demo.launch(share=True, server_port=7861, server_name='0.0.0.0')
+# Mount Gradio app under /gradio path
+app = gr.mount_gradio_app(app, demo, path="/gradio")
+
+# Helper function to convert PIL Image to base64
+def image_to_base64(image: Image.Image) -> str:
+    buffered = BytesIO()
+    image.save(buffered, format="PNG")
+    return base64.b64encode(buffered.getvalue()).decode()
+
+@app.get("/")
+async def root():
+    return {"message": "API is running. Access Gradio interface at /gradio"}
+
+# REST API endpoint
+@app.post("/api/process_image")
+async def process_image(
+    file: UploadFile = File(...),
+    box_threshold: float = 0.05,
+    iou_threshold: float = 0.1,
+    use_paddleocr: bool = True,
+    imgsz: int = 640
+):
+    try:
+        # Read and convert uploaded file to PIL Image
+        image_data = await file.read()
+        image = Image.open(BytesIO(image_data))
+        
+        # Process the image using existing function
+        output_image, parsed_content = process(
+            image,
+            box_threshold,
+            iou_threshold,
+            use_paddleocr,
+            imgsz
+        )
+        
+        # Convert output image to base64
+        output_image_base64 = image_to_base64(output_image)
+        
+        return JSONResponse({
+            "status": "success",
+            "output_image": output_image_base64,
+            "parsed_content": parsed_content
+        })
+    except Exception as e:
+        return JSONResponse({
+            "status": "error",
+            "message": str(e)
+        }, status_code=500)
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)

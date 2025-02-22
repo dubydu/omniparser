@@ -30,3 +30,9 @@ screeninfo
 uiautomation
 dashscope
 groq
+fastapi
+uvicorn
+python-multipart
+pillow
+requests
+pytest
