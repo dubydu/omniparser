@@ -36,7 +36,7 @@ def process(
     use_paddleocr,
     imgsz
 ) -> Optional[Image.Image]:
-    image_save_path = 'imgs/saved_image_demo.png'
+    image_save_path = 'demo/saved_image_demo.png'
     image_input.save(image_save_path)
     image = Image.open(image_save_path)
     box_overlay_ratio = image.size[0] / 3200
